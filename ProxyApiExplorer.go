@@ -373,6 +373,429 @@ func (pm *ProxyMonitor) redirectToLogin(w http.ResponseWriter, r *http.Request) 
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
+// handleLogin 处理登录页面
+func (pm *ProxyMonitor) handleLogin(w http.ResponseWriter, r *http.Request) {
+	// 检查是否已经登录
+	if cookie, err := r.Cookie("session_id"); err == nil {
+		if session := pm.validateSession(cookie.Value); session != nil {
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+			return
+		}
+	}
+
+	html := `<!DOCTYPE html>
+<html>
+<head>
+    <title>登录 - ProxyApiExplorer</title>
+    <meta charset="UTF-8">
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            margin: 0; 
+            padding: 0; 
+            height: 100vh; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+        }
+        .login-container { 
+            background: white; 
+            padding: 40px; 
+            border-radius: 10px; 
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3); 
+            width: 100%; 
+            max-width: 400px; 
+        }
+        .login-header { 
+            text-align: center; 
+            margin-bottom: 30px; 
+        }
+        .login-header h1 { 
+            color: #333; 
+            margin-bottom: 10px; 
+        }
+        .login-header p { 
+            color: #666; 
+            margin: 0; 
+        }
+        .form-group { 
+            margin-bottom: 20px; 
+        }
+        .form-group label { 
+            display: block; 
+            margin-bottom: 5px; 
+            font-weight: bold; 
+            color: #333; 
+        }
+        .form-group input { 
+            width: 100%; 
+            padding: 12px; 
+            border: 1px solid #ddd; 
+            border-radius: 5px; 
+            box-sizing: border-box; 
+            font-size: 16px; 
+        }
+        .form-group input:focus { 
+            outline: none; 
+            border-color: #007bff; 
+            box-shadow: 0 0 5px rgba(0,123,255,0.3); 
+        }
+        .btn { 
+            width: 100%; 
+            padding: 12px; 
+            background: #007bff; 
+            color: white; 
+            border: none; 
+            border-radius: 5px; 
+            font-size: 16px; 
+            cursor: pointer; 
+            transition: background 0.3s; 
+        }
+        .btn:hover { 
+            background: #0056b3; 
+        }
+        .alert { 
+            padding: 15px; 
+            margin-bottom: 20px; 
+            border-radius: 5px; 
+            display: none; 
+        }
+        .alert-danger { 
+            background: #f8d7da; 
+            color: #721c24; 
+            border: 1px solid #f5c6cb; 
+        }
+        .alert-success { 
+            background: #d4edda; 
+            color: #155724; 
+            border: 1px solid #c3e6cb; 
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <div class="login-header">
+            <h1>ProxyApiExplorer</h1>
+            <p>请登录以访问管理界面</p>
+        </div>
+        
+        <div id="alert" class="alert alert-danger"></div>
+        
+        <form id="loginForm">
+            <div class="form-group">
+                <label for="username">用户名:</label>
+                <input type="text" id="username" name="username" required>
+            </div>
+            <div class="form-group">
+                <label for="password">密码:</label>
+                <input type="password" id="password" name="password" required>
+            </div>
+            <button type="submit" class="btn">登录</button>
+        </form>
+    </div>
+
+    <script>
+        function showAlert(message, type) {
+            const alert = document.getElementById('alert');
+            alert.className = 'alert alert-' + type;
+            alert.textContent = message;
+            alert.style.display = 'block';
+            setTimeout(() => {
+                alert.style.display = 'none';
+            }, 5000);
+        }
+
+        document.getElementById('loginForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            
+            fetch('/api/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password })
+            })
+            .then(response => {
+                if (response.ok) {
+                    showAlert('登录成功，正在跳转...', 'success');
+                    setTimeout(() => {
+                        window.location.href = '/';
+                    }, 1000);
+                } else {
+                    return response.text().then(text => {
+                        throw new Error(text);
+                    });
+                }
+            })
+            .catch(error => {
+                showAlert('登录失败: ' + error.message, 'danger');
+            });
+        });
+    </script>
+</body>
+</html>`
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(html))
+}
+
+// handleLoginAPI 处理登录API
+func (pm *ProxyMonitor) handleLoginAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var loginReq struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&loginReq); err != nil {
+		http.Error(w, "请求格式错误", http.StatusBadRequest)
+		return
+	}
+
+	// 验证用户名和密码
+	if loginReq.Username != pm.config.Username || loginReq.Password != pm.config.Password {
+		http.Error(w, "用户名或密码错误", http.StatusUnauthorized)
+		return
+	}
+
+	// 创建会话
+	session := pm.createSession(loginReq.Username)
+
+	// 设置会话cookie
+	cookie := &http.Cookie{
+		Name:     "session_id",
+		Value:    session.ID,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   false, // 在生产环境中应该设置为true
+		SameSite: http.SameSiteStrictMode,
+		Expires:  session.ExpiresAt,
+	}
+	http.SetCookie(w, cookie)
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("登录成功"))
+}
+
+// handleLogout 处理注销
+func (pm *ProxyMonitor) handleLogout(w http.ResponseWriter, r *http.Request) {
+	// 获取会话cookie
+	if cookie, err := r.Cookie("session_id"); err == nil {
+		pm.deleteSession(cookie.Value)
+	}
+
+	// 清除cookie
+	cookie := &http.Cookie{
+		Name:     "session_id",
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		MaxAge:   -1,
+	}
+	http.SetCookie(w, cookie)
+
+	http.Redirect(w, r, "/login", http.StatusSeeOther)
+}
+
+// handleUserManagement 处理用户管理页面
+func (pm *ProxyMonitor) handleUserManagement(w http.ResponseWriter, r *http.Request) {
+	html := `<!DOCTYPE html>
+<html>
+<head>
+    <title>用户管理 - ProxyApiExplorer</title>
+    <meta charset="UTF-8">
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .header { text-align: center; margin-bottom: 30px; }
+        .nav { margin-bottom: 20px; }
+        .nav a { margin-right: 15px; text-decoration: none; color: #007bff; }
+        .nav a:hover { text-decoration: underline; }
+        .form-group { margin-bottom: 20px; }
+        .form-group label { display: block; margin-bottom: 5px; font-weight: bold; }
+        .form-group input { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+        .btn { padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; margin-right: 10px; }
+        .btn-primary { background: #007bff; color: white; }
+        .btn-danger { background: #dc3545; color: white; }
+        .btn:hover { opacity: 0.8; }
+        .current-user { background: #e9ecef; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
+        .alert { padding: 15px; margin: 20px 0; border-radius: 5px; }
+        .alert-success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .alert-danger { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="nav">
+            <a href="/">修改界面</a>
+            <a href="/config">配置管理</a>
+            <a href="/data">原始数据</a>
+            <a href="/user">用户管理</a>
+            <a href="/logout">注销</a>
+        </div>
+        
+        <div class="header">
+            <h1>用户管理</h1>
+            <p>修改登录用户名和密码</p>
+        </div>
+
+        <div class="current-user">
+            <h3>当前用户信息</h3>
+            <p><strong>用户名:</strong> <span id="current-username">admin</span></p>
+            <p><strong>会话状态:</strong> <span style="color: green;">已登录</span></p>
+        </div>
+
+        <form id="userForm">
+            <div class="form-group">
+                <label for="new_username">新用户名:</label>
+                <input type="text" id="new_username" name="new_username" required>
+            </div>
+            <div class="form-group">
+                <label for="new_password">新密码:</label>
+                <input type="password" id="new_password" name="new_password" required>
+            </div>
+            <div class="form-group">
+                <label for="confirm_password">确认密码:</label>
+                <input type="password" id="confirm_password" name="confirm_password" required>
+            </div>
+            <div style="text-align: center; margin-top: 30px;">
+                <button type="submit" class="btn btn-primary">更新用户信息</button>
+                <button type="button" class="btn btn-danger" onclick="confirmLogout()">注销登录</button>
+            </div>
+        </form>
+    </div>
+
+    <script>
+        function showAlert(message, type) {
+            const alertDiv = document.createElement('div');
+            alertDiv.className = 'alert alert-' + type;
+            alertDiv.textContent = message;
+            document.querySelector('.container').insertBefore(alertDiv, document.querySelector('.current-user'));
+            setTimeout(() => alertDiv.remove(), 5000);
+        }
+
+        function loadCurrentUser() {
+            fetch('/api/user')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('current-username').textContent = data.username;
+                    document.getElementById('new_username').value = data.username;
+                })
+                .catch(error => {
+                    showAlert('加载用户信息失败: ' + error.message, 'danger');
+                });
+        }
+
+        function confirmLogout() {
+            if (confirm('确定要注销登录吗？')) {
+                window.location.href = '/logout';
+            }
+        }
+
+        document.getElementById('userForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const newUsername = document.getElementById('new_username').value;
+            const newPassword = document.getElementById('new_password').value;
+            const confirmPassword = document.getElementById('confirm_password').value;
+            
+            if (newPassword !== confirmPassword) {
+                showAlert('两次输入的密码不一致', 'danger');
+                return;
+            }
+            
+            if (newPassword.length < 4) {
+                showAlert('密码长度至少4位', 'danger');
+                return;
+            }
+
+            fetch('/api/user', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    username: newUsername, 
+                    password: newPassword 
+                })
+            })
+            .then(response => {
+                if (response.ok) {
+                    showAlert('用户信息更新成功，请重新登录', 'success');
+                    setTimeout(() => {
+                        window.location.href = '/logout';
+                    }, 2000);
+                } else {
+                    return response.text().then(text => {
+                        throw new Error(text);
+                    });
+                }
+            })
+            .catch(error => {
+                showAlert('更新失败: ' + error.message, 'danger');
+            });
+        });
+
+        // 页面加载时获取当前用户信息
+        window.onload = loadCurrentUser;
+    </script>
+</body>
+</html>`
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(html))
+}
+
+// handleUserAPI 处理用户API
+func (pm *ProxyMonitor) handleUserAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method == "GET" {
+		// 返回当前用户信息
+		response := map[string]string{
+			"username": pm.config.Username,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	} else if r.Method == "POST" {
+		// 更新用户信息
+		var userReq struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&userReq); err != nil {
+			http.Error(w, "请求格式错误", http.StatusBadRequest)
+			return
+		}
+
+		if userReq.Username == "" || userReq.Password == "" {
+			http.Error(w, "用户名和密码不能为空", http.StatusBadRequest)
+			return
+		}
+
+		if len(userReq.Password) < 4 {
+			http.Error(w, "密码长度至少4位", http.StatusBadRequest)
+			return
+		}
+
+		// 更新配置
+		pm.config.Username = userReq.Username
+		pm.config.Password = userReq.Password
+
+		// 保存配置到文件
+		if err := pm.saveConfig(); err != nil {
+			http.Error(w, "保存配置失败", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("用户信息更新成功"))
+	}
+}
+
 // startModifyServer 启动修改界面服务器
 func (pm *ProxyMonitor) startModifyServer() {
 	if !pm.config.EnableModify {
@@ -380,12 +803,21 @@ func (pm *ProxyMonitor) startModifyServer() {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", pm.handleModifyUI)
-	mux.HandleFunc("/api/pending", pm.handleGetPending)
-	mux.HandleFunc("/api/modify", pm.handleModifyRequest)
-	mux.HandleFunc("/api/config", pm.handleConfigAPI)
-	mux.HandleFunc("/config", pm.handleConfigUI)
-	mux.HandleFunc("/data", pm.handleDataManagement)
+
+	// 公开路由（不需要认证）
+	mux.HandleFunc("/login", pm.handleLogin)
+	mux.HandleFunc("/api/login", pm.handleLoginAPI)
+	mux.HandleFunc("/logout", pm.handleLogout)
+
+	// 受保护的路由（需要认证）
+	mux.HandleFunc("/", pm.requireAuth(pm.handleModifyUI))
+	mux.HandleFunc("/api/pending", pm.requireAuth(pm.handleGetPending))
+	mux.HandleFunc("/api/modify", pm.requireAuth(pm.handleModifyRequest))
+	mux.HandleFunc("/api/config", pm.requireAuth(pm.handleConfigAPI))
+	mux.HandleFunc("/config", pm.requireAuth(pm.handleConfigUI))
+	mux.HandleFunc("/data", pm.requireAuth(pm.handleDataManagement))
+	mux.HandleFunc("/user", pm.requireAuth(pm.handleUserManagement))
+	mux.HandleFunc("/api/user", pm.requireAuth(pm.handleUserAPI))
 
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", pm.config.ModifyPort),
@@ -464,6 +896,8 @@ func (pm *ProxyMonitor) handleDataManagement(w http.ResponseWriter, r *http.Requ
             <a href="/">修改界面</a>
             <a href="/config">配置管理</a>
             <a href="/data">原始数据</a>
+            <a href="/user">用户管理</a>
+            <a href="/logout">注销</a>
         </div>
         
         <div class="header">
@@ -716,6 +1150,8 @@ func (pm *ProxyMonitor) handleModifyUI(w http.ResponseWriter, r *http.Request) {
             <a href="/">修改界面</a>
             <a href="/config">配置管理</a>
             <a href="/data">原始数据</a>
+            <a href="/user">用户管理</a>
+            <a href="/logout">注销</a>
         </div>
         
         <div class="header">
@@ -1051,6 +1487,8 @@ func (pm *ProxyMonitor) handleConfigUI(w http.ResponseWriter, r *http.Request) {
             <a href="/">修改界面</a>
             <a href="/config">配置管理</a>
             <a href="/data">原始数据</a>
+            <a href="/user">用户管理</a>
+            <a href="/logout">注销</a>
         </div>
         
         <div class="header">
@@ -1273,6 +1711,12 @@ func loadConfig() *Config {
 			if config.MaxRequests == 0 {
 				config.MaxRequests = 10000
 			}
+			if config.Username == "" {
+				config.Username = "admin"
+			}
+			if config.Password == "" {
+				config.Password = "admin"
+			}
 			return config
 		}
 	} else {
@@ -1302,6 +1746,8 @@ func loadConfig() *Config {
 		FilterKeywords: []string{},
 		MaxRequests:    10000,
 		OutputDir:      "api_explorer_reports",
+		Username:       "admin",
+		Password:       "admin",
 	}
 
 	// 保存默认配置文件
@@ -1326,10 +1772,39 @@ func (pm *ProxyMonitor) saveConfig() error {
 }
 
 func main() {
-	fmt.Println("=== ProxyApiExplorer - 增强版请求修改功能 ===")
+	fmt.Println("=== ProxyApiExplorer - 增强版用户认证功能 ===")
 
 	config := loadConfig()
 	monitor := NewProxyMonitor(config)
+
+	// 启动配置文件保护服务器（阻止直接访问配置文件）
+	go func() {
+		configMux := http.NewServeMux()
+		configMux.HandleFunc("/ProxyApiExplorer_config.json", func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "访问被拒绝", http.StatusForbidden)
+		})
+		configMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			// 检查是否试图访问配置文件
+			if strings.Contains(r.URL.Path, "config.json") {
+				http.Error(w, "访问被拒绝", http.StatusForbidden)
+				return
+			}
+			http.NotFound(w, r)
+		})
+
+		configServer := &http.Server{
+			Addr:    ":8890", // 使用不同的端口来保护配置文件
+			Handler: configMux,
+		}
+
+		fmt.Printf("配置文件保护服务: http://localhost:8890\n")
+		if err := configServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("配置文件保护服务器错误: %v", err)
+		}
+	}()
+
+	fmt.Printf("默认登录信息 - 用户名: %s, 密码: %s\n", config.Username, config.Password)
+	fmt.Printf("请访问 http://localhost:%d 进行登录\n", config.ModifyPort)
 
 	if err := monitor.Start(); err != nil && err != http.ErrServerClosed {
 		log.Printf("服务器错误: %v", err)
