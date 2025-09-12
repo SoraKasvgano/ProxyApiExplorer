@@ -29,6 +29,8 @@ type Config struct {
 	FilterKeywords   []string `json:"filter_keywords"`   // 过滤关键字
 	MaxRequests      int      `json:"max_requests"`      // 最大请求数
 	OutputDir        string   `json:"output_dir"`        // 输出目录
+	Username         string   `json:"username"`          // 用户名
+	Password         string   `json:"password"`          // 密码
 }
 
 // ModifyRequest 待修改的请求
@@ -63,6 +65,14 @@ type APIData struct {
 	ResponseBody    string            `json:"response_body,omitempty"`
 }
 
+// Session 会话信息
+type Session struct {
+	ID        string    `json:"id"`
+	Username  string    `json:"username"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
 // ProxyMonitor 代理监控器（简化版）
 type ProxyMonitor struct {
 	config         *Config
@@ -71,6 +81,8 @@ type ProxyMonitor struct {
 	pendingReqs    map[string]*ModifyRequest      // 待修改的请求
 	modifyChannels map[string]chan ModifyResponse // 修改响应通道
 	modifyMutex    sync.RWMutex
+	sessions       map[string]*Session // 会话管理
+	sessionMutex   sync.RWMutex
 }
 
 // NewProxyMonitor 创建新的代理监控器
@@ -79,6 +91,7 @@ func NewProxyMonitor(config *Config) *ProxyMonitor {
 		config:         config,
 		pendingReqs:    make(map[string]*ModifyRequest),
 		modifyChannels: make(map[string]chan ModifyResponse),
+		sessions:       make(map[string]*Session),
 	}
 }
 
@@ -285,6 +298,79 @@ func sanitizeFilename(filename string) string {
 	filename = strings.ReplaceAll(filename, "|", "_")
 	filename = strings.ReplaceAll(filename, "\"", "_")
 	return filename
+}
+
+// generateSessionID 生成会话ID
+func (pm *ProxyMonitor) generateSessionID() string {
+	return fmt.Sprintf("session_%d_%d", time.Now().UnixNano(), time.Now().Unix())
+}
+
+// createSession 创建新会话
+func (pm *ProxyMonitor) createSession(username string) *Session {
+	pm.sessionMutex.Lock()
+	defer pm.sessionMutex.Unlock()
+
+	session := &Session{
+		ID:        pm.generateSessionID(),
+		Username:  username,
+		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(24 * time.Hour), // 24小时过期
+	}
+
+	pm.sessions[session.ID] = session
+	return session
+}
+
+// validateSession 验证会话
+func (pm *ProxyMonitor) validateSession(sessionID string) *Session {
+	pm.sessionMutex.RLock()
+	defer pm.sessionMutex.RUnlock()
+
+	session, exists := pm.sessions[sessionID]
+	if !exists {
+		return nil
+	}
+
+	if time.Now().After(session.ExpiresAt) {
+		delete(pm.sessions, sessionID)
+		return nil
+	}
+
+	return session
+}
+
+// deleteSession 删除会话
+func (pm *ProxyMonitor) deleteSession(sessionID string) {
+	pm.sessionMutex.Lock()
+	defer pm.sessionMutex.Unlock()
+	delete(pm.sessions, sessionID)
+}
+
+// requireAuth 认证中间件
+func (pm *ProxyMonitor) requireAuth(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// 检查会话cookie
+		cookie, err := r.Cookie("session_id")
+		if err != nil {
+			pm.redirectToLogin(w, r)
+			return
+		}
+
+		session := pm.validateSession(cookie.Value)
+		if session == nil {
+			pm.redirectToLogin(w, r)
+			return
+		}
+
+		// 续期会话
+		session.ExpiresAt = time.Now().Add(24 * time.Hour)
+		handler(w, r)
+	}
+}
+
+// redirectToLogin 重定向到登录页面
+func (pm *ProxyMonitor) redirectToLogin(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
 // startModifyServer 启动修改界面服务器
@@ -645,7 +731,10 @@ func (pm *ProxyMonitor) handleModifyUI(w http.ResponseWriter, r *http.Request) {
         </div>
 
         <div class="pending-requests">
-            <h3>待处理请求</h3>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <h3>待处理请求</h3>
+                <button onclick="manualRefresh()" class="btn btn-secondary">手动刷新</button>
+            </div>
             <div id="requests-container">
                 <div class="no-requests">
                     <p>暂无待处理的请求</p>
@@ -657,6 +746,9 @@ func (pm *ProxyMonitor) handleModifyUI(w http.ResponseWriter, r *http.Request) {
 
     <script>
         let pendingRequests = {};
+        let expandedRequests = new Set(); // 记录展开的请求
+        let editingRequests = new Set();  // 记录正在编辑的请求
+        let refreshPaused = false;        // 刷新暂停标志
 
         function showAlert(message, type) {
             const alertDiv = document.createElement('div');
@@ -676,18 +768,38 @@ func (pm *ProxyMonitor) handleModifyUI(w http.ResponseWriter, r *http.Request) {
             if (details.style.display === 'none') {
                 details.style.display = 'block';
                 btn.textContent = '隐藏详情';
+                expandedRequests.add(id);
             } else {
                 details.style.display = 'none';
                 btn.textContent = '显示详情';
+                expandedRequests.delete(id);
+                editingRequests.delete(id);
             }
+        }
+
+        // 监听输入框变化，标记为正在编辑
+        function markAsEditing(id) {
+            editingRequests.add(id);
+            // 暂停刷新5秒
+            refreshPaused = true;
+            setTimeout(() => {
+                refreshPaused = false;
+            }, 5000);
+        }
+
+        // 检查请求是否正在被编辑
+        function isRequestBeingEdited(id) {
+            return editingRequests.has(id);
         }
 
         function addHeaderField(containerId) {
             const container = document.getElementById(containerId);
+            const requestId = containerId.replace('headers-', '');
             const headerItem = document.createElement('div');
             headerItem.className = 'header-item';
-            headerItem.innerHTML = '<input type="text" placeholder="Header名称" style="flex: 1;"><input type="text" placeholder="Header值" style="flex: 2;"><button type="button" onclick="this.parentElement.remove()" class="btn btn-danger" style="margin-left: 10px;">删除</button>';
+            headerItem.innerHTML = '<input type="text" placeholder="Header名称" style="flex: 1;" oninput="markAsEditing(\'' + requestId + '\')"><input type="text" placeholder="Header值" style="flex: 2;" oninput="markAsEditing(\'' + requestId + '\')"><button type="button" onclick="this.parentElement.remove()" class="btn btn-danger" style="margin-left: 10px;">删除</button>';
             container.appendChild(headerItem);
+            markAsEditing(requestId); // 添加头部字段也算编辑操作
         }
 
         function sendRequest(id, action) {
@@ -745,7 +857,7 @@ func (pm *ProxyMonitor) handleModifyUI(w http.ResponseWriter, r *http.Request) {
             
             let headersHtml = '';
             Object.entries(request.headers || {}).forEach(([key, value]) => {
-                headersHtml += '<div class="header-item"><input type="text" value="' + key + '" style="flex: 1;"><input type="text" value="' + value + '" style="flex: 2;"><button type="button" onclick="this.parentElement.remove()" class="btn btn-danger" style="margin-left: 10px;">删除</button></div>';
+                headersHtml += '<div class="header-item"><input type="text" value="' + key + '" style="flex: 1;" oninput="markAsEditing(\'' + request.id + '\')"><input type="text" value="' + value + '" style="flex: 2;" oninput="markAsEditing(\'' + request.id + '\')"><button type="button" onclick="this.parentElement.remove()" class="btn btn-danger" style="margin-left: 10px;">删除</button></div>';
             });
 
             return '<div class="request-item">' +
@@ -760,11 +872,11 @@ func (pm *ProxyMonitor) handleModifyUI(w http.ResponseWriter, r *http.Request) {
                 '<div id="details-' + request.id + '" class="request-details">' +
                     '<div class="form-group">' +
                         '<label>请求方法:</label>' +
-                        '<input type="text" id="method-' + request.id + '" value="' + request.method + '">' +
+                        '<input type="text" id="method-' + request.id + '" value="' + request.method + '" oninput="markAsEditing(\'' + request.id + '\')">' +
                     '</div>' +
                     '<div class="form-group">' +
                         '<label>请求URL:</label>' +
-                        '<input type="text" id="url-' + request.id + '" value="' + request.url + '">' +
+                        '<input type="text" id="url-' + request.id + '" value="' + request.url + '" oninput="markAsEditing(\'' + request.id + '\')">' +
                     '</div>' +
                     '<div class="form-group">' +
                         '<label>请求头部:</label>' +
@@ -773,7 +885,7 @@ func (pm *ProxyMonitor) handleModifyUI(w http.ResponseWriter, r *http.Request) {
                     '</div>' +
                     '<div class="form-group">' +
                         '<label>请求正文:</label>' +
-                        '<textarea id="body-' + request.id + '">' + (request.body || '') + '</textarea>' +
+                        '<textarea id="body-' + request.id + '" oninput="markAsEditing(\'' + request.id + '\')">' + (request.body || '') + '</textarea>' +
                     '</div>' +
                     '<div style="text-align: center; margin-top: 20px;">' +
                         '<button onclick="sendRequest(\'' + request.id + '\', \'send_original\')" class="btn btn-success">发送原始请求</button>' +
@@ -785,6 +897,11 @@ func (pm *ProxyMonitor) handleModifyUI(w http.ResponseWriter, r *http.Request) {
         }
 
         function loadPendingRequests() {
+            // 如果刷新被暂停，跳过本次刷新
+            if (refreshPaused) {
+                return;
+            }
+
             fetch('/api/pending')
                 .then(response => response.json())
                 .then(requests => {
@@ -800,13 +917,39 @@ func (pm *ProxyMonitor) handleModifyUI(w http.ResponseWriter, r *http.Request) {
                     if (requests.length === 0) {
                         container.innerHTML = '<div class="no-requests"><p>暂无待处理的请求</p><p>当有符合拦截规则的请求时，会在这里显示</p></div>';
                         pendingRequests = {};
+                        expandedRequests.clear();
+                        editingRequests.clear();
                     } else {
+                        // 检查是否有正在编辑的请求
+                        let hasEditingRequests = false;
+                        requests.forEach(request => {
+                            if (isRequestBeingEdited(request.id)) {
+                                hasEditingRequests = true;
+                            }
+                        });
+
+                        // 如果有正在编辑的请求，延迟刷新
+                        if (hasEditingRequests) {
+                            console.log('检测到正在编辑的请求，延迟刷新...');
+                            return;
+                        }
+
                         let html = '';
                         requests.forEach(request => {
                             pendingRequests[request.id] = request;
                             html += renderRequest(request);
                         });
                         container.innerHTML = html;
+
+                        // 恢复之前展开的请求状态
+                        expandedRequests.forEach(id => {
+                            const details = document.getElementById('details-' + id);
+                            const btn = document.getElementById('toggle-' + id);
+                            if (details && btn) {
+                                details.style.display = 'block';
+                                btn.textContent = '隐藏详情';
+                            }
+                        });
                     }
                 })
                 .catch(error => {
@@ -814,8 +957,16 @@ func (pm *ProxyMonitor) handleModifyUI(w http.ResponseWriter, r *http.Request) {
                 });
         }
 
-        // 定期刷新待处理请求
-        setInterval(loadPendingRequests, 2000);
+        // 定期刷新待处理请求 - 增加刷新间隔到5秒
+        setInterval(loadPendingRequests, 5000);
+        
+        // 手动刷新函数
+        function manualRefresh() {
+            refreshPaused = false;
+            editingRequests.clear();
+            loadPendingRequests();
+            showAlert('已手动刷新', 'success');
+        }
         
         // 页面加载时立即加载
         window.onload = loadPendingRequests;
