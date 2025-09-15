@@ -144,7 +144,7 @@ RUN mkdir -p /root/api_explorer_reports
 
 # 暴露端口
 EXPOSE 8888
-
+EXPOSE 8889
 # 启动程序
 CMD ["./proxy-explorer"]
 ```
@@ -171,6 +171,7 @@ docker run -d \
 docker run -d \
   --name proxy-explorer \
   -p 8888:8888 \
+  -p 8889:8889 \
   -v $(pwd)/config:/root/config \
   -v $(pwd)/reports:/root/api_explorer_reports \
   proxy-api-explorer
@@ -195,6 +196,7 @@ docker run -d \
   --name proxy-explorer \
   --restart unless-stopped \
   -p 8888:8888 \
+  -p 8889:8889 \
   -v /home/pi/proxy-reports:/root/api_explorer_reports \
   proxy-explorer
 ```
@@ -232,6 +234,7 @@ services:
     container_name: proxy-api-explorer
     ports:
       - "8888:8888"
+      - "8889:8889"
     volumes:
       - ./reports:/root/api_explorer_reports
       - ./config:/root/config
@@ -280,6 +283,7 @@ docker run -d \
   --read-only \
   --tmpfs /tmp \
   -p 8888:8888 \
+  -p 8889:8889 \
   -v $(pwd)/reports:/root/api_explorer_reports \
   proxy-api-explorer
 ```
@@ -294,6 +298,7 @@ docker run -d \
   --name proxy-explorer \
   --network proxy-net \
   -p 8888:8888 \
+  -p 8889:8889 \
   proxy-api-explorer
 ```
 
@@ -557,3 +562,4 @@ admin
 - 简单报告生成
 
 ---
+
